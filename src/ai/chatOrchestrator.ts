@@ -1,85 +1,182 @@
 /**
  * chatOrchestrator.ts
- * Ví dụ 1 API route (Next.js) xử lý 1 tin nhắn chat từ người dùng, nối đúng
- * luồng đã mô tả ở Phụ lục B.3 trong docs/plan-website-goi-y-bua-an-gia-dinh.md:
- *
- *   User message
- *     -> parseUserIntent()   (AI - Lớp 1 chiều vào)
- *     -> processIntent()     (Engine - Lớp 2, rule-based)
- *     -> composeResponse()   (AI - Lớp 1 chiều ra)
- *     -> lưu log + trả kết quả cho frontend
+ * Nối luồng: Intent Parser -> Engine -> Response Composer
+ * Thay thế các `declare` stubs bằng store thật (familyStore).
  */
 
-import { parseUserIntent, type FamilyContext } from "../ai/intentParser";
+import { parseUserIntent, type FamilyContext } from "./intentParser";
 import { processIntent } from "../engine/nutritionEngine";
-import { composeResponse } from "../ai/responseComposer";
+import { composeResponse } from "./responseComposer";
+import { getFamily, saveWeeklyMenu } from "../lib/store/sqliteStore";
 import type { EngineDiffOutput } from "../types/schemas";
 
-// Các hàm dưới đây chỉ là chữ ký ví dụ — thực tế nối vào lớp DB thật (Postgres/Supabase)
-declare function getFamilyContext(familyId: string): Promise<FamilyContext>;
-declare function saveChatLog(entry: {
-  familyId: string;
-  userMessage: string;
-  aiReply: string;
-  diff: EngineDiffOutput;
-  timestamp: string;
-}): Promise<void>;
-declare const engineDeps: Parameters<typeof processIntent>[2];
-
-export interface ChatHandlerResult {
-  reply: string;
-  needsUserConfirmation: boolean;
-  diff: EngineDiffOutput;
+export interface ChatResult {
+  response: string;
+  needsConfirmation: boolean;
+  changes: EngineDiffOutput | null;
 }
 
-export async function handleChatMessage(
+export async function processChatMessage(
   familyId: string,
-  userMessage: string
-): Promise<ChatHandlerResult> {
-  // 1. Lấy ngữ cảnh gia đình hiện tại (tóm tắt, không nhét cả DB vào prompt)
-  const context = await getFamilyContext(familyId);
+  userMessage: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  familyData: any
+): Promise<ChatResult> {
+  const family = familyData ?? getFamily(familyId);
+  if (!family) throw new Error("Family not found");
 
-  // 2. Lớp 1 chiều vào: AI hiểu ý định -> JSON có cấu trúc, đã validate bằng zod
+  // Build context for intent parser (summary, not full data)
+  const context: FamilyContext = {
+    familyId,
+    members: family.members.map((m: { id: string; ten: string; tuoi: number; di_ung: string[] }) => ({
+      id: m.id,
+      name: m.ten,
+      age: m.tuoi,
+      restrictions: m.di_ung,
+    })),
+    currentWeekMenuSummary: buildMenuSummary(family),
+  };
+
+  // Layer 1 inbound: AI parses natural language -> structured intent
   const intent = await parseUserIntent(userMessage, context);
 
-  // 2b. Nếu model tự thấy không đủ thông tin, trả câu hỏi làm rõ ngay,
-  // KHÔNG gọi Engine (tránh áp dụng thay đổi dựa trên phỏng đoán)
+  // Short-circuit: unclear intent or needs clarification
   if (intent.intent === "unclear" || intent.clarification_question) {
-    const reply =
-      intent.clarification_question ??
-      "Mình chưa hiểu rõ ý bạn, bạn có thể nói cụ thể hơn không?";
     return {
-      reply,
-      needsUserConfirmation: false,
-      diff: {
-        status: "rejected",
-        reject_reason: "Cần làm rõ thêm thông tin từ người dùng.",
-        changes: [],
-        nutrition_impact: { before: {}, after: {}, warnings: [] },
-        severity_flag: intent.severity_flag,
-        professional_advice_note: null,
-      },
+      response:
+        intent.clarification_question ??
+        "Mình chưa hiểu rõ ý bạn. Bạn có thể nói cụ thể hơn không?",
+      needsConfirmation: false,
+      changes: null,
     };
   }
 
-  // 3. Lớp 2: Engine rule-based áp dụng thay đổi + tính lại dinh dưỡng theo RDA
-  const diff = await processIntent(familyId, intent, engineDeps);
+  // Handle general_question without touching menu data
+  if (intent.intent === "general_question") {
+    const response = await composeResponse(userMessage, {
+      status: "rejected",
+      reject_reason: null,
+      changes: [],
+      nutrition_impact: { before: {}, after: {}, warnings: [] },
+      severity_flag: "none",
+      professional_advice_note: null,
+    });
+    return { response, needsConfirmation: false, changes: null };
+  }
 
-  // 4. Lớp 1 chiều ra: AI diễn giải kết quả kỹ thuật thành câu trả lời tự nhiên
-  const reply = await composeResponse(userMessage, diff);
+  // Layer 2: rule-based engine processes intent
+  const latestMenu = family.weekly_menus[family.weekly_menus.length - 1]?.menu_data;
 
-  // 5. Ghi log để phục vụ "Hoàn tác" và tra cứu lịch sử (bảng ai_chat_logs)
-  await saveChatLog({
-    familyId,
-    userMessage,
-    aiReply: reply,
-    diff,
-    timestamp: new Date().toISOString(),
-  });
+  const engineDeps = buildEngineDeps(familyId, latestMenu);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const diff = await processIntent(familyId, intent, engineDeps as any);
 
-  // 6. Nếu severity_flag yêu cầu xác nhận, để UI chặn lại chờ người dùng bấm
-  // "Xác nhận áp dụng" thay vì tự động áp dụng ngay (mục B.3 trong plan)
-  const needsUserConfirmation = diff.severity_flag !== "none";
+  // Layer 1 outbound: AI narrates technical diff in natural language
+  const response = await composeResponse(userMessage, diff);
 
-  return { reply, needsUserConfirmation, diff };
+  return {
+    response,
+    needsConfirmation: diff.severity_flag !== "none",
+    changes: diff,
+  };
+}
+
+function buildMenuSummary(family: { weekly_menus: Array<{ week_start: string; menu_data: { slots?: Array<{ meal_slot: string; dishes: Array<{ ten: string }> }> } }> }): string {
+  const latest = family.weekly_menus[family.weekly_menus.length - 1];
+  if (!latest?.menu_data) return "Chưa có thực đơn nào được tạo.";
+  const slots = latest.menu_data?.slots ?? [];
+  const sample = slots.slice(0, 6).map((s: { meal_slot: string; dishes: Array<{ ten: string }> }) =>
+    `${s.meal_slot}: ${s.dishes.map((d: { ten: string }) => d.ten).join(", ")}`
+  );
+  return `Tuần ${latest.week_start}. Mẫu: ${sample.join(" | ")}`;
+}
+
+// Build EngineDeps from in-memory store + current menu data
+function buildEngineDeps(familyId: string, menuData: { slots?: Array<{
+  date: string;
+  mealSlot: string;
+  memberIds: string[];
+  dish: {
+    id: string;
+    name: string;
+    mealSlot: string;
+    ingredients: string[];
+    nutritionPerServing: Record<string, number>;
+  };
+}> } | null) {
+  return {
+    async getFamilyMembers(fId: string) {
+      const f = getFamily(fId);
+      if (!f) return [];
+      return f.members.map((m) => ({
+        id: m.id,
+        name: m.ten,
+        age: m.tuoi,
+        restrictions: m.di_ung,
+        dailyTargets: {} as Record<string, number>,
+      }));
+    },
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async getWeeklyMenu(_familyId: string) {
+      if (!menuData?.slots) return [];
+      return menuData.slots.map((s) => ({
+        date: s.date,
+        mealSlot: s.mealSlot as "sang" | "trua" | "toi" | "phu",
+        memberIds: s.memberIds,
+        dish: {
+          id: s.dish.id,
+          name: s.dish.name,
+          mealSlot: s.dish.mealSlot as "sang" | "trua" | "toi" | "phu",
+          ingredients: s.dish.ingredients ?? [],
+          nutritionPerServing: s.dish.nutritionPerServing ?? {},
+        },
+      }));
+    },
+
+    async findAlternativeDish(params: {
+      mealSlot: string;
+      excludeIngredients: string[];
+      similarTo?: { nhomMon?: string };
+    }) {
+      // Lazy-load dishes to avoid circular dependency
+      try {
+        const { DISHES } = await import("../lib/data/dishes");
+        const candidates = DISHES.filter(
+          (d) =>
+            d.mealSlots.includes(params.mealSlot as "sang" | "trua" | "toi" | "phu") &&
+            !d.nguyenLieu.some((ing) =>
+              params.excludeIngredients.some((exc) =>
+                ing.toLowerCase().includes(exc.toLowerCase())
+              )
+            )
+        );
+        // Prefer same nhomMon as original dish
+        const sameCat = params.similarTo?.nhomMon
+          ? candidates.filter((d) => d.nhomMon === params.similarTo!.nhomMon)
+          : [];
+        const candidate = sameCat.length > 0
+          ? sameCat[Math.floor(Math.random() * sameCat.length)]
+          : candidates[Math.floor(Math.random() * candidates.length)];
+        if (!candidate) return null;
+        return {
+          id: candidate.id,
+          name: candidate.ten,
+          mealSlot: params.mealSlot as "sang" | "trua" | "toi" | "phu",
+          ingredients: candidate.nguyenLieu,
+          nutritionPerServing: candidate.nutritionPerServing as Record<string, number>,
+        };
+      } catch {
+        return null;
+      }
+    },
+
+    async saveWeeklyMenu(fId: string, menu: unknown[]) {
+      if (!menuData) return;
+      saveWeeklyMenu(fId, {
+        week_start: new Date().toISOString().slice(0, 10),
+        menu_data: { ...menuData, slots: menu },
+      });
+    },
+  };
 }

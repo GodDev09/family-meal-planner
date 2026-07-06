@@ -1,0 +1,23 @@
+{
+  "name": "BuaCom.AI – Thực đơn gia đình Việt",
+  "short_name": "BuaCom.AI",
+  "description": "Gợi ý thực đơn 7 ngày theo chuẩn dinh dưỡng Việt Nam 2016",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#22c55e",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "categories": ["food", "health", "lifestyle"]
+}

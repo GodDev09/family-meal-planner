@@ -1,46 +1,125 @@
-# Website Gợi ý Bữa ăn Gia đình — Tài liệu & Code mẫu
+# BuaCom.AI — Thực đơn gia đình Việt
 
-## Cấu trúc thư mục
+Website gợi ý thực đơn 7 ngày theo chuẩn dinh dưỡng **RDA Việt Nam 2016** (Bộ Y tế / Viện Dinh dưỡng), cá nhân hoá cho từng thành viên gia đình.
 
-```
-project/
-├── docs/
-│   └── plan-website-goi-y-bua-an-gia-dinh.md   # Bản kế hoạch đầy đủ (tính năng, kiến trúc, roadmap)
-└── src/
-    ├── types/
-    │   └── schemas.ts             # Zod schema dùng chung, khớp Phụ lục B trong plan
-    ├── ai/
-    │   ├── intentParser.ts        # Lớp 1 chiều vào: Claude API + tool-use (Phụ lục A.1)
-    │   ├── responseComposer.ts    # Lớp 1 chiều ra: diễn giải kết quả (Phụ lục A.2)
-    │   └── chatOrchestrator.ts    # Nối luồng: Intent Parser -> Engine -> Response Composer
-    └── engine/
-        └── nutritionEngine.ts     # Lớp 2: engine rule-based, tính lại dinh dưỡng + sinh diff
-```
+## Tính năng
 
-## Cài đặt để chạy thử (khi tích hợp vào dự án Next.js/Node.js thật)
+| Tính năng | Mô tả |
+|---|---|
+| Đăng nhập bằng mã | Không cần username/password — mã `FAM-XXXXXXXX` là chìa khoá |
+| Hồ sơ gia đình | Thêm/sửa/xoá thành viên, cài PAL, khai báo dị ứng, thai sản |
+| Tính toán dinh dưỡng | BMR × PAL theo bảng RDA 2016 — kcal, macro, 16 vi chất |
+| Sinh thực đơn 7 ngày | 100 món Việt, greedy algorithm, đa dạng nguồn protein, tránh lặp tuần trước |
+| Đổi món / Khoá bữa | Swap dish theo cùng nhóm, lock slot khi tạo lại |
+| Danh sách đi chợ | Group by category, tích đã mua, export `.txt` |
+| Báo cáo dinh dưỡng | Actual vs target bars, NutritionWarnings |
+| Lịch sử | Thực đơn các tuần + lịch sử chat AI |
+| Dark mode | Auto-detect hệ thống, toggle trong Settings |
+| Trợ lý AI | Tích hợp Gemini Flash (cần config API key — xem bên dưới) |
+
+## Tech stack
+
+- **Frontend**: Next.js 15, React 19, Tailwind CSS v3
+- **Database**: SQLite (`better-sqlite3`) — file `data/buacom.db`
+- **AI** (optional): Google Gemini Flash (miễn phí 1500 req/ngày)
+- **Auth**: Code-based login (no password)
+
+## Chạy ngay (dev)
 
 ```bash
-npm install @anthropic-ai/sdk zod
+# 1. Clone / copy project vào máy
+
+# 2. Cài dependencies
+npm install
+
+# 3. Copy env file
+cp .env.local.example .env.local
+# Bỏ trống nếu chưa cần AI, hoặc điền GEMINI_API_KEY
+
+# 4. Chạy dev server
+npm run dev
+
+# 5. Mở http://localhost:3000
 ```
 
-Thiết lập biến môi trường:
-```
-ANTHROPIC_API_KEY=sk-ant-...
+> SQLite DB tự tạo lúc chạy lần đầu. Không cần cấu hình gì thêm.
+
+## Cấu hình AI (tuỳ chọn)
+
+Tính năng chat trợ lý AI dùng **Google Gemini Flash** — miễn phí:
+
+1. Lấy API key: https://aistudio.google.com/app/apikey
+2. Thêm vào `.env.local`:
+   ```
+   GEMINI_API_KEY=AIzaSy...
+   ```
+3. Restart dev server
+
+## Build production
+
+```bash
+npm run build
+npm start
 ```
 
-## Lưu ý khi triển khai thật
+## Deploy Vercel
 
-1. **`intentParser.ts` và `responseComposer.ts`** hiện dùng model `claude-sonnet-4-6` —
-   kiểm tra lại tên model mới nhất trong tài liệu Claude API (`docs.claude.com`) tại
-   thời điểm triển khai, vì danh sách model có thể thay đổi.
-2. **`nutritionEngine.ts`** mới là bản khung (skeleton) minh hoạ cho intent
-   `add_restriction`. Cần viết thêm các handler cho `adjust_energy_goal`,
-   `add_temporary_guest`, `swap_specific_dish`,... theo cùng khuôn mẫu.
-3. Các hàm có `declare function ...` trong `chatOrchestrator.ts` là **placeholder**
-   cần nối vào lớp DB thật (Postgres/Supabase) theo schema đã mô tả ở mục 5.1
-   trong file plan (`families`, `family_members`, `weekly_menus`, `ai_chat_logs`).
-4. Luôn validate output của AI bằng zod trước khi tin tưởng (đã làm trong
-   `intentParser.ts`) — không bỏ qua bước này dù đã dùng tool-use.
-5. Với `severity_flag !== "none"`, chặn ở tầng UI (nút "Xác nhận áp dụng"/"Huỷ")
-   trước khi ghi thay đổi xuống DB thật, tránh áp dụng ngầm các thay đổi liên
-   quan sức khỏe.
+```bash
+# Cài Vercel CLI
+npm i -g vercel
+
+# Deploy
+vercel deploy
+
+# Sau khi deploy: thêm GEMINI_API_KEY vào Vercel Environment Variables
+```
+
+> **Lưu ý Vercel**: SQLite lưu file local — không persist trên serverless. Với Vercel, nên dùng Neon/PlanetScale/Supabase. Xem `src/lib/store/supabaseAdapter.ts`.
+
+## Scripts hữu ích
+
+```bash
+npm run dev          # Dev server http://localhost:3000
+npm run build        # Production build
+npm run lint         # ESLint check
+npm run db:reset     # Xoá toàn bộ dữ liệu (reset DB)
+```
+
+## Cấu trúc thư mục chính
+
+```
+src/
+├── app/                    # Next.js App Router pages + API routes
+│   ├── api/family/         # CRUD family, members, settings
+│   ├── api/menu/           # Generate, swap, lock, undo
+│   ├── api/nutrition/      # RDA calculation
+│   ├── api/chat/           # Gemini AI chat
+│   ├── onboarding/         # 3-step wizard cho family mới
+│   ├── dashboard/          # Tổng quan
+│   ├── family/             # Quản lý thành viên
+│   ├── menu/               # Thực đơn 7 ngày
+│   ├── nutrition/          # Báo cáo dinh dưỡng
+│   ├── shopping/           # Danh sách đi chợ
+│   ├── history/            # Lịch sử
+│   └── settings/           # Cài đặt
+├── components/
+│   ├── chat/ChatWidget     # Floating AI chat (disabled khi chưa có key)
+│   ├── menu/               # SwapDishModal, DishDetailModal
+│   └── ui/                 # Nav, NutritionWarnings, ThemeToggle, ...
+├── lib/
+│   ├── db/client.ts        # SQLite connection + schema init
+│   ├── store/sqliteStore   # Persistence layer (SQLite)
+│   ├── data/dishes.ts      # 100 món Việt (in-memory)
+│   ├── nutrition/          # RDA 2016 tables + BMR/PAL calculator
+│   └── menu/generator.ts   # Thuật toán sinh thực đơn
+└── ai/                     # Gemini intent parser + response composer
+```
+
+## Nguồn tham khảo khoa học
+
+- Bộ Y tế / Viện Dinh dưỡng (2016) — *Nhu cầu dinh dưỡng khuyến nghị cho người Việt Nam*
+- Bảng thành phần thực phẩm Việt Nam — Viện Dinh dưỡng Quốc gia
+
+---
+
+*Đây là công cụ gợi ý tham khảo, không thay thế tư vấn y khoa chuyên nghiệp.*
